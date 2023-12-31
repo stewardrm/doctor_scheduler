@@ -2,10 +2,14 @@ import copy
 import random
 import math
 import pandas as pd
+import statistics
+import calendar
+from datetime import datetime, timedelta
+
 
 class DoctorScheduling:
-    def __init__(self, num_days_in_month, doctor_shifts, days_unavail, allow_day_night_double, allow_night_day_double, max_days_in_row, req_days_off, ideal_num_shifts, shift_type_pref, prev_month=None):
-        self.num_days_in_month = num_days_in_month
+    def __init__(self, sched_month, doctor_shifts, doctor_shift_types, days_unavail, allow_day_night_double, allow_night_day_double, max_days_in_row, req_days_off, ideal_num_shifts, shift_type_pref, prev_month=None):
+       
         self.doctor_shifts = doctor_shifts
         self.days_unavail = days_unavail
         self.allow_day_night_double = allow_day_night_double
@@ -15,11 +19,18 @@ class DoctorScheduling:
         self.ideal_num_shifts = ideal_num_shifts
         self.shift_type_pref = shift_type_pref
         self.prev_month=prev_month
+        self.doctor_shift_types=doctor_shift_types
         self.tot_prev_shifts={}
-        self.calendar, self.scheduler, self.tot_prev_shifts = self.initialize_monthly_scheduler()
+        self.sched_month=sched_month
+        self.calendar, self.scheduler, self.tot_prev_shifts,self.num_days_in_month, self.weekends = self.initialize_monthly_scheduler()
 
     def initialize_monthly_scheduler(self):
-        calendar = {day: ["Day1", "Day2", "Night"] for day in range(1, self.num_days_in_month + 1)}
+        docs=list(self.days_unavail.keys())
+        num_days_in_month = self.get_days_in_month(self.sched_month)
+        weekends=self.get_weekends_formatted(self.sched_month)
+        self.assign_doctors_to_weekends(docs, weekends)
+
+        calendar = {day: ["Day1", "Day2", "Night"] for day in range(1, num_days_in_month + 1)}
         scheduler = {}
 
         if self.prev_month is None:
@@ -29,7 +40,18 @@ class DoctorScheduling:
         else:
             scheduler, self.tot_prev_shifts = self.modify_prev_month(self.prev_month)
 
-        return calendar, scheduler, self.tot_prev_shifts
+        
+        return calendar, scheduler, self.tot_prev_shifts, num_days_in_month, weekends
+
+    def get_days_in_month(self, month_year):
+        # Parse the month and year from the input string
+        datetime_object = datetime.strptime(month_year, '%b %Y')
+        month = datetime_object.month
+        year = datetime_object.year
+
+        # Using calendar.monthrange to get the number of days in the month
+        _, num_days = calendar.monthrange(year, month)
+        return num_days
 
 
     def modify_prev_month(self):
@@ -62,7 +84,7 @@ class DoctorScheduling:
         
         for i in range(10000):
             remaining_shifts = [(day, shift) for day in self.calendar for shift in self.calendar[day]]
-            self.calendar, self.scheduler, self.tot_prev_shifts = self.initialize_monthly_scheduler()
+            self.calendar, self.scheduler, self.tot_prev_shifts,self.num_days_in_month, self.weekends = self.initialize_monthly_scheduler()
             while remaining_shifts:
                 day, shift_type = random.choice(remaining_shifts)
                 docs_below = self.doctors_below_minimum(self.doctor_shifts, self.scheduler,self.tot_prev_shifts)
@@ -156,12 +178,12 @@ class DoctorScheduling:
                 else:
                     schedule_created=True
 
-                doctor = random.choice(eligible_doctors)
-                self.scheduler[doctor][shift_type].append(day)
+                doc=self.fewest_shifts(self.scheduler,shift_type, eligible_doctors)    
+                self.scheduler[doc][shift_type].append(day) 
                 remaining_shifts.remove((day, shift_type))
 
             if schedule_created==True:
-                print("Scheduler initialized successfully.")
+                print(i," Scheduler initialized successfully.")
                 return
 
         print("Too many constraints.  Unable to initialize schedule.")
@@ -174,6 +196,8 @@ class DoctorScheduling:
                 tot_prev_shifts[doc]=0       
         if self.has_consecutive_shifts(schedule):
             return False, f"Doctor scheduled for three consecutive shifts."
+        if self.check_min_shift_types(schedule):
+            return False, f"Doctor does not have correct number of shift_types."
         flattened=self.flatten_schedule(schedule)
         for flattened_sched in flattened.values():
             if self.check_max_consec_days(flattened_sched, self.max_days_in_row):
@@ -320,10 +344,14 @@ class DoctorScheduling:
                     if (day-1) in shifts['Night']:
                         return True
         return False
+    import pandas as pd
 
-    def print_horizontal(self, doctor_schedules):
+    def print_horizontal(self, doctor_schedules, weekend_days):
         # Create a DataFrame with the required structure
         df = pd.DataFrame(index=doctor_schedules.keys(), columns=range(1, self.num_days_in_month + 1))
+
+        # Flatten the weekend days for easy checking
+        flat_weekend_days = [day for days in weekend_days.values() for day in days]
 
         # Fill the DataFrame based on the schedule
         for doctor, shifts in doctor_schedules.items():
@@ -352,7 +380,18 @@ class DoctorScheduling:
                 color = 'black'
             return f'color: {color}'
 
-        return df.style.applymap(color_schedule)
+        # Define styles for weekend days in the header
+        header_styles = [{
+            'selector': f'th.col_heading.level0.col{col-1}',
+            'props': [('background-color', 'lightgrey'), ('color', 'red')]  # Change color here
+        } for col in flat_weekend_days]
+
+        # Apply styles to the DataFrame
+        styled_df = df.style.applymap(color_schedule)
+        styled_df = styled_df.set_table_styles(header_styles)
+        return styled_df
+
+
 
     def calculate_percentage_days_off(self, schedule):
         percentages = {}
@@ -380,12 +419,16 @@ class DoctorScheduling:
 
             percentages[doctor] = round(percentage_off, 2)  # Rounded to 2 decimal places
         for each in percentages:
-            print(each," percent or requested days off actually off:",percentages[each])
+            print(each," percent of requested days off actually off:",percentages[each])
 
     def actual_vs_requested_shifts(self,schedule):
-        self.count_total_shifts(schedule['A'])
-        for each in schedule:   
-            print(each," req:",self.ideal_num_shifts[each]," actual shifts:",self.count_total_shifts(schedule[each])-self.tot_prev_shifts[each])
+        wkendsoff=self.calculate_weekends_off(schedule, self.weekends)
+        for each in schedule:
+            d1=len(schedule[each]['Day1'])-self.num_shifts_prev_month(schedule[each]['Day1'])
+            d2=len(schedule[each]['Day2'])-self.num_shifts_prev_month(schedule[each]['Day2'])
+            night=len(schedule[each]['Night'])-self.num_shifts_prev_month(schedule[each]['Night'])
+            print(each," req:",self.ideal_num_shifts[each]," actual shifts:",self.count_total_shifts(schedule[each])-self.tot_prev_shifts[each], "Day1: ",d1," Day2: ",d2," Night: ",night, " Weekends off: ",wkendsoff[each])
+
 
     def percentage_of_preferred_shift(self,schedule):
         for each in schedule:
@@ -402,12 +445,13 @@ class DoctorScheduling:
 
     def mountain_climber(self,iterations,weight=None):
         if weight==None:
-            weight={"pattern":.25,"days_off":.25,"num_shifts":.25,"shift_type":.25}
+            weight={"pattern":.2,"days_off":.2,"num_shifts":.2,"shift_type":.2,"shift_pref":.2}
         pattern_loss = self.schedule_pattern_loss(self.scheduler)
         req_daysoff_loss=self.req_daysoff_score(self.scheduler)
         num_shift_var_loss=self.shift_variation_score(self.scheduler)
         prefer_shift_loss=self.shifttype_pref_score(self.scheduler)
-        cur_loss=weight["pattern"]*(pattern_loss-35)/(235-35)+weight["days_off"]*req_daysoff_loss/25+weight["num_shifts"]*num_shift_var_loss/25+weight["shift_type"]*prefer_shift_loss/3.5
+        d2_loss=self.num_d2_shift_score(self.scheduler)
+        cur_loss=2*weight["shift_type"]*d2_loss+weight["pattern"]*(pattern_loss-35)/(235-32)+weight["days_off"]*req_daysoff_loss/8+weight["num_shifts"]*num_shift_var_loss/4+weight["shift_pref"]*prefer_shift_loss*.44
         print(cur_loss)
 
         # Total iterations and initial modifications
@@ -429,7 +473,8 @@ class DoctorScheduling:
                 req_daysoff_loss=self.req_daysoff_score(sched_update)
                 num_shift_var_loss=self.shift_variation_score(sched_update)
                 prefer_shift_loss=self.shifttype_pref_score(sched_update)
-                new_loss=weight["pattern"]*(pattern_loss-35)/(235-35)+weight["days_off"]*req_daysoff_loss/25+weight["num_shifts"]*num_shift_var_loss/25+weight["shift_type"]*prefer_shift_loss/3.5
+                d2_loss=self.num_d2_shift_score(sched_update)
+                new_loss=2*weight["shift_type"]*d2_loss+weight["pattern"]*(pattern_loss-35)/(235-32)+weight["days_off"]*req_daysoff_loss/8+weight["num_shifts"]*num_shift_var_loss/4+weight["shift_type"]*prefer_shift_loss*.44
                 if new_loss < cur_loss:
                     self.scheduler = sched_update
                     cur_loss = new_loss
@@ -438,12 +483,13 @@ class DoctorScheduling:
 
     def simulated_annealing(self,iterations,weight=None):
         if weight==None:
-            weight={"pattern":.25,"days_off":.25,"num_shifts":.25,"shift_type":.25}
+            weight={"pattern":.2,"days_off":.2,"num_shifts":.2,"shift_type":.2,"shift_pref":.2}
         pattern_loss = self.schedule_pattern_loss(self.scheduler)
         req_daysoff_loss=self.req_daysoff_score(self.scheduler)
         num_shift_var_loss=self.shift_variation_score(self.scheduler)
         prefer_shift_loss=self.shifttype_pref_score(self.scheduler)
-        cur_loss=weight["pattern"]*(pattern_loss-35)/(235-35)+weight["days_off"]*req_daysoff_loss/25+weight["num_shifts"]*num_shift_var_loss/25+weight["shift_type"]*prefer_shift_loss/3.5
+        d2_loss=self.num_d2_shift_score(self.scheduler)
+        cur_loss=2*weight["shift_type"]*d2_loss+weight["pattern"]*(pattern_loss-35)/(235-32)+weight["days_off"]*req_daysoff_loss/8+weight["num_shifts"]*num_shift_var_loss/4+weight["shift_pref"]*prefer_shift_loss*.44
         print("current loss: ",cur_loss)
 
         # Total iterations and initial modifications
@@ -468,7 +514,8 @@ class DoctorScheduling:
                 req_daysoff_loss=self.req_daysoff_score(sched_update)
                 num_shift_var_loss=self.shift_variation_score(sched_update)
                 prefer_shift_loss=self.shifttype_pref_score(sched_update)
-                new_loss=weight["pattern"]*(pattern_loss-35)/(235-35)+weight["days_off"]*req_daysoff_loss/25+weight["num_shifts"]*num_shift_var_loss/25+weight["shift_type"]*prefer_shift_loss/3.5
+                d2_loss=self.num_d2_shift_score(sched_update)
+                new_loss=2*weight["shift_type"]*d2_loss+weight["pattern"]*(pattern_loss-35)/(235-32)+weight["days_off"]*req_daysoff_loss/8+weight["num_shifts"]*num_shift_var_loss/4+weight["shift_type"]*prefer_shift_loss*.44
                 if new_loss < cur_loss:
                     accept = True
                 else:
@@ -600,3 +647,121 @@ class DoctorScheduling:
         schedule[chosen_doctor][shift].append(date)
         schedule[chosen_doctor][shift].sort()  # Optional: Sort for better readability
         return schedule
+    
+    def num_shifts_prev_month(self, shift_dates):
+        num_shifts = sum(1 for element in shift_dates if element < 1)
+        return num_shifts
+
+    def fewest_shifts(self,schedule,shift,eligible_doctors):
+        fewest=100
+        for doc in eligible_doctors:
+            num_shifts=len(schedule[doc][shift])-self.num_shifts_prev_month(schedule[doc][shift])
+            if num_shifts<fewest:
+                return_doc=doc
+                fewest=num_shifts
+        return return_doc  
+
+    def check_min_shift_types(self, schedule):
+        for doc in schedule:
+            for shift in schedule[doc]:
+                num_shifts=len(schedule[doc][shift])-self.num_shifts_prev_month(schedule[doc][shift])
+                if num_shifts<self.doctor_shift_types[doc][shift][0] or num_shifts>self.doctor_shift_types[doc][shift][1] :
+                    return True
+        return False    
+
+    def num_d2_shift_score(self, schedule):
+        d2s=[]
+        for doc in schedule:
+            d2s.append(len(schedule[doc]['Day2'])-self.num_shifts_prev_month(schedule[doc]['Day2']))
+        var=statistics.variance(d2s)
+        var=var/.5
+        return var
+    
+    def get_weekends_formatted(self, month_year):
+        # Parsing the input string to get month and year
+        datetime_object = datetime.strptime(month_year, '%b %Y')
+        month = datetime_object.month
+        year = datetime_object.year
+
+        # Finding the number of days in the month
+        _, num_days = calendar.monthrange(year, month)
+
+        # Creating a list of all dates in the month
+        dates = [datetime(year, month, day) for day in range(1, num_days + 1)]
+
+        # Filtering out the weekends (Saturday and Sunday)
+        weekends = [date.day for date in dates if date.weekday() in (5, 6)]
+
+        # Grouping weekends
+        weekend_groups = {}
+        for i, weekend_day in enumerate(weekends):
+            if i % 2 == 0:
+                weekend_label = {0: "first", 2: "second", 4: "third", 6: "fourth", 8: "fifth"}.get(i, "extra")
+                weekend_groups[weekend_label] = [weekend_day]
+            else:
+                weekend_groups[weekend_label].append(weekend_day)
+
+        return weekend_groups
+
+    def assign_doctors_to_weekends(self, doctors, weekends):
+        assignment = {}
+        weekends_off_count = {doc: 0 for doc in doctors}  # Track weekends off for each doctor
+
+        # Pre-assign doctors who are unavailable for part of a weekend
+        for week, days in weekends.items():
+            assignment[week] = []
+            for doc in doctors:
+                if any(day in self.days_unavail[doc]["Day"] or day in self.days_unavail[doc]["Night"] for day in days):
+                    assignment[week].append(doc)
+                    weekends_off_count[doc] += 1
+                    # Break if two doctors are already assigned to this weekend
+                    if len(assignment[week]) == 2:
+                        break
+
+        
+        # Assign remaining doctors to weekends, aiming for fairness
+        for week, days in weekends.items():
+            if len(assignment[week]) < 2:
+                sorted_doctors = sorted(doctors, key=lambda doc: weekends_off_count[doc])
+                for doc in sorted_doctors:
+                    if doc not in assignment[week]:
+                        assignment[week].append(doc)
+                        weekends_off_count[doc] += 1
+                        # Break if two doctors are now assigned to this weekend
+                        if len(assignment[week]) == 2:
+                            break
+
+        # Update days_unavail based on the final assignment
+        for week, assigned_doctors in assignment.items():
+            for doc in assigned_doctors:
+                for day in weekends[week]:
+                    if day not in self.days_unavail[doc]["Day"]:
+                        self.days_unavail[doc]["Day"].append(day)
+                    if day not in self.days_unavail[doc]["Night"]:
+                        self.days_unavail[doc]["Night"].append(day)
+
+        return assignment
+
+
+    def calculate_weekends_off(self, doctor_shifts, weekend_dates):
+        weekends_off = {}
+
+        # Iterate through each doctor and their shifts
+        for doctor, shifts in doctor_shifts.items():
+            off_count = 0
+            all_shifts = shifts['Day1'] + shifts['Day2'] + shifts['Night']
+
+            # Check each weekend
+            for weekend in weekend_dates.values():
+                days_off = sum(day not in all_shifts for day in weekend)
+                
+                # If the doctor is off for both days, count as 1; if off for one day, count as 0.5
+                if days_off == 2:
+                    off_count += 1
+                elif days_off ==1 and len(weekend) == 1:
+                    off_count += 0.5
+            
+            weekends_off[doctor] = off_count
+
+        return weekends_off
+        
